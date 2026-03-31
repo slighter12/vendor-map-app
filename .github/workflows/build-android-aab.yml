@@ -1,0 +1,258 @@
+name: Build Android AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build. Leave blank to use the selected branch or tag."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build AAB on EAS
+    runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      EXPO_PROJECT_ID: ${{ secrets.EXPO_PROJECT_ID }}
+      EXPO_PUBLIC_API_BASE_URL: ${{ secrets.EXPO_PUBLIC_API_BASE_URL }}
+      EXPO_PUBLIC_GOOGLE_CLIENT_ID: ${{ secrets.EXPO_PUBLIC_GOOGLE_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS: ${{ secrets.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS }}
+      EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID: ${{ secrets.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID }}
+      EXPO_PUBLIC_DEBUG_LOGS: ${{ secrets.EXPO_PUBLIC_DEBUG_LOGS }}
+      GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+      GCS_PREFIX: ${{ vars.GCS_PREFIX }}
+      GCS_SIGNED_URL_DURATION: ${{ vars.GCS_SIGNED_URL_DURATION }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+    steps:
+      - name: Check required GitHub secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+
+          for name in \
+            EXPO_TOKEN \
+            EXPO_PROJECT_ID \
+            EXPO_PUBLIC_API_BASE_URL \
+            EXPO_PUBLIC_GOOGLE_CLIENT_ID \
+            EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS \
+            EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error title=Missing secret::GitHub Actions secret '$name' is required."
+              missing=1
+            fi
+          done
+
+          if [ -z "${GCS_BUCKET:-}" ]; then
+            echo "::error title=Missing variable::GitHub Actions variable 'GCS_BUCKET' is required."
+            missing=1
+          fi
+
+          if [ -z "${GCP_WORKLOAD_IDENTITY_PROVIDER:-}" ]; then
+            echo "::error title=Missing variable::GitHub Actions variable 'GCP_WORKLOAD_IDENTITY_PROVIDER' is required."
+            missing=1
+          fi
+
+          if [ -z "${GCP_SERVICE_ACCOUNT:-}" ]; then
+            echo "::error title=Missing variable::GitHub Actions variable 'GCP_SERVICE_ACCOUNT' is required."
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Missing one or more required GitHub Actions secrets or variables." >&2
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve build context
+        id: context
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "requested_ref=${{ inputs.ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "app_version=$(node -p "require('./app.json').expo.version")" >> "$GITHUB_OUTPUT"
+          echo "build_timestamp=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Expo config for CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const loadConfig = require("./app.config.js");
+          const config = typeof loadConfig === "function" ? loadConfig() : loadConfig;
+          const projectId = config?.extra?.eas?.projectId;
+
+          if (!projectId) {
+            console.error(
+              "Missing EAS project ID. Set EXPO_PROJECT_ID in GitHub Secrets or expo.extra.eas.projectId in Expo config."
+            );
+            process.exit(1);
+          }
+
+          console.log(`Using EAS project ID: ${projectId}`);
+          NODE
+
+      - name: Trigger EAS Android AAB build
+        id: eas_build
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_json="$RUNNER_TEMP/eas-build-aab.json"
+
+          eas build \
+            --platform android \
+            --profile production-aab \
+            --non-interactive \
+            --wait \
+            --json \
+            > "$build_json"
+
+          node - "$build_json" "$GITHUB_OUTPUT" <<'NODE'
+          const fs = require("fs");
+          const [jsonPath, outputPath] = process.argv.slice(2);
+          const raw = fs.readFileSync(jsonPath, "utf8").trim();
+
+          if (!raw) {
+            throw new Error("EAS build returned empty JSON output.");
+          }
+
+          const parsed = JSON.parse(raw);
+          const build = Array.isArray(parsed) ? parsed[0] : parsed;
+          const buildId = build?.id;
+          const detailsUrl = build?.buildDetailsPageUrl ?? "";
+          const artifactUrl =
+            build?.artifacts?.buildUrl ??
+            build?.artifacts?.applicationArchiveUrl ??
+            "";
+
+          if (!buildId) {
+            throw new Error(`Could not determine build ID from EAS output: ${raw}`);
+          }
+
+          if (!artifactUrl) {
+            throw new Error(`Could not determine artifact URL for build ${buildId}.`);
+          }
+
+          fs.appendFileSync(outputPath, `build_id=${buildId}\n`);
+          fs.appendFileSync(outputPath, `details_url=${detailsUrl}\n`);
+          fs.appendFileSync(outputPath, `artifact_url=${artifactUrl}\n`);
+          NODE
+
+      - name: Download AAB artifact
+        shell: bash
+        env:
+          ARTIFACT_URL: ${{ steps.eas_build.outputs.artifact_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          curl -fsSL "$ARTIFACT_URL" -o dist/vendor-map-app.aab
+
+      - name: Prepare GCS object metadata
+        id: gcs_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ref_slug="$(printf '%s' "${{ steps.context.outputs.requested_ref }}" | tr '/:@ ' '-' | tr -cd '[:alnum:]._-')"
+          if [ -z "$ref_slug" ]; then
+            ref_slug="manual"
+          fi
+
+          prefix="${GCS_PREFIX:-mobile-builds}"
+          prefix="${prefix#/}"
+          prefix="${prefix%/}"
+
+          artifact_file="vendor-map-app-${{ steps.context.outputs.app_version }}-${ref_slug}-${{ steps.context.outputs.short_sha }}-${{ steps.context.outputs.build_timestamp }}.aab"
+          object_path="android/aab/${{ steps.context.outputs.app_version }}/${artifact_file}"
+
+          if [ -n "$prefix" ]; then
+            object_path="${prefix}/${object_path}"
+          fi
+
+          echo "artifact_file=$artifact_file" >> "$GITHUB_OUTPUT"
+          echo "object_path=$object_path" >> "$GITHUB_OUTPUT"
+          echo "gs_uri=gs://${GCS_BUCKET}/${object_path}" >> "$GITHUB_OUTPUT"
+          echo "signed_url_duration=${GCS_SIGNED_URL_DURATION:-12h}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: ">= 416.0.0"
+
+      - name: Upload AAB to GCS
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud storage cp dist/vendor-map-app.aab "${{ steps.gcs_meta.outputs.gs_uri }}"
+
+      - name: Generate signed download URL
+        id: gcs_signed_url
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed_url="$(
+            gcloud storage sign-url "${{ steps.gcs_meta.outputs.gs_uri }}" \
+              --duration="${{ steps.gcs_meta.outputs.signed_url_duration }}" \
+              --format='value(signed_url)'
+          )"
+          echo "signed_url=$signed_url" >> "$GITHUB_OUTPUT"
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab-${{ steps.context.outputs.commit_sha }}
+          path: dist/vendor-map-app.aab
+          if-no-files-found: error
+
+      - name: Write job summary
+        shell: bash
+        run: |
+          {
+            echo "## Android AAB build"
+            echo ""
+            echo "- Profile: \`production-aab\`"
+            echo "- Requested ref: \`${{ inputs.ref || github.ref_name }}\`"
+            echo "- Checked out commit: \`${{ steps.context.outputs.commit_sha }}\`"
+            echo "- App version: \`${{ steps.context.outputs.app_version }}\`"
+            echo "- EAS build ID: \`${{ steps.eas_build.outputs.build_id }}\`"
+            echo "- EAS build details: ${{ steps.eas_build.outputs.details_url }}"
+            echo "- GitHub artifact: \`android-aab-${{ steps.context.outputs.commit_sha }}\`"
+            echo "- GCS object: \`${{ steps.gcs_meta.outputs.gs_uri }}\`"
+            echo "- Signed URL (${{ steps.gcs_meta.outputs.signed_url_duration }}): ${{ steps.gcs_signed_url.outputs.signed_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

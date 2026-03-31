@@ -1,0 +1,27 @@
+{
+  "cli": {
+    "version": ">= 18.4.0",
+    "promptToConfigurePushNotifications": false
+  },
+  "build": {
+    "base": {
+      "credentialsSource": "remote",
+      "android": {
+        "image": "latest"
+      }
+    },
+    "preview-apk": {
+      "extends": "base",
+      "distribution": "internal",
+      "environment": "preview",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production-aab": {
+      "extends": "base",
+      "distribution": "store",
+      "environment": "production"
+    }
+  }
+}
