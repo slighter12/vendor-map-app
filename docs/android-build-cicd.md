@@ -4,13 +4,16 @@ This repository includes two manually triggered GitHub Actions workflows for And
 
 - `Build Android APK`: generates a directly installable `.apk` for internal testing.
 - `Build Android AAB`: generates a `.aab` for store-oriented release workflows.
-- Both workflows also upload the final binary to Google Cloud Storage and generate a signed download URL.
+- Both workflows call the same reusable workflow so the actual CI logic lives in one place.
+- Both workflows upload the final binary to Google Cloud Storage.
+- Signed URLs are optional and are not written into the job summary.
 - Google Cloud authentication is configured with Workload Identity Federation instead of a long-lived service account key.
 
 ## Files added
 
 - `.github/workflows/build-android-apk.yml`
 - `.github/workflows/build-android-aab.yml`
+- `.github/workflows/_android-build.yml`
 - `eas.json`
 - `app.config.js`
 
@@ -52,7 +55,6 @@ Configure these repository secrets in GitHub:
 - `EXPO_PUBLIC_GOOGLE_CLIENT_ID`
 - `EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS`
 - `EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID`
-- `EXPO_PUBLIC_DEBUG_LOGS` (optional)
 
 `EXPO_PROJECT_ID` is read by `app.config.js` and injected into Expo config at build time. This keeps the repository free of a hard-coded EAS project ID while still allowing CI builds to resolve the project in non-interactive mode.
 
@@ -66,6 +68,7 @@ Configure these repository variables in GitHub:
 - `GCS_BUCKET`
 - `GCS_PREFIX` (optional, defaults to `mobile-builds`)
 - `GCS_SIGNED_URL_DURATION` (optional, defaults to `12h`)
+- `EXPO_PUBLIC_DEBUG_LOGS` (optional)
 
 Example object paths:
 
@@ -99,6 +102,7 @@ At minimum, grant bucket-level access equivalent to:
 For Workload Identity Federation, also allow the GitHub repository to impersonate the service account:
 
 - Grant `roles/iam.workloadIdentityUser` on the service account to the GitHub principal set for `slighter12/vendor-map-app`
+- Grant `roles/iam.serviceAccountTokenCreator` on the service account if you want the workflow to generate signed URLs
 
 Recommended Google Cloud setup commands:
 
@@ -168,16 +172,22 @@ Both workflows:
 
 - are triggered manually with `workflow_dispatch`
 - accept an optional `ref` input
-- install dependencies with `npm ci`
-- authenticate using `expo/expo-github-action`
-- authenticate to Google Cloud with `google-github-actions/auth` using Workload Identity Federation
-- fail early when required GitHub secrets are missing
-- run `eas build --platform android --non-interactive --wait --json`
-- download the resulting EAS artifact
-- upload it to Google Cloud Storage
-- generate a signed GCS download URL
-- keep a copy as a GitHub Actions artifact
-- write the build profile, commit SHA, app version, EAS build URL, GCS object path, and signed URL into the job summary
+- accept a `generate_signed_url` boolean input
+- delegate the actual build logic to the reusable workflow at `.github/workflows/_android-build.yml`
+
+The reusable workflow:
+
+- installs dependencies with `npm ci`
+- uses `actions/checkout@v4` and `actions/setup-node@v4`
+- pins EAS CLI to `18.4.0`
+- authenticates to Google Cloud with `google-github-actions/auth` using Workload Identity Federation
+- fails early when required GitHub secrets or variables are missing
+- runs `eas build --platform android --non-interactive --wait --json`
+- downloads the resulting EAS artifact
+- uploads it to Google Cloud Storage
+- optionally generates a signed GCS download URL
+- keeps a copy as a GitHub Actions artifact
+- writes the build profile, commit SHA, app version, EAS build URL, and GCS object path into the job summary
 
 ## Running the workflows
 
@@ -187,8 +197,9 @@ From GitHub:
 2. Choose either `Build Android APK` or `Build Android AAB`.
 3. Click `Run workflow`.
 4. Optionally provide a branch, tag, or commit in `ref`.
-5. Open the job summary to copy the signed GCS download URL.
-6. Or download the backup copy from the GitHub Actions artifact section.
+5. Leave `generate_signed_url` disabled unless you explicitly need a signed link.
+6. Download the app package from the GitHub Actions artifact section, or copy the `gs://...` path from the job summary.
+7. If you enabled `generate_signed_url`, download the URL from the extra signed-URL artifact rather than the job summary.
 
 ## Notes and limitations
 
@@ -199,6 +210,7 @@ From GitHub:
 - If GCS authentication fails, verify the Workload Identity Provider path, service account email, IAM bindings, and that GitHub Actions has `id-token: write`.
 - Google notes that Workload Identity Pool / Provider / IAM changes can take up to about 5 minutes to propagate. If setup is fresh, wait and rerun once before troubleshooting deeper.
 - With Workload Identity Federation, `gcloud storage sign-url` uses service account-based signing without a private key file, so practical signed URL duration is capped at 12 hours. Use a shorter duration or switch distribution strategy if you need longer-lived links.
+- Signed URL generation is best-effort. If it fails, the build still succeeds, the GCS upload remains available, and the job summary points you back to IAM/signBlob troubleshooting instead of exposing a partial URL.
 
 ## References
 
@@ -210,3 +222,4 @@ From GitHub:
 - [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation)
 - [Cloud Storage signed URLs](https://cloud.google.com/storage/docs/access-control/signed-urls)
 - [gcloud storage sign-url](https://cloud.google.com/sdk/gcloud/reference/storage/sign-url)
+- [Reusable workflows](https://docs.github.com/en/actions/sharing-automations/reusing-workflows)
