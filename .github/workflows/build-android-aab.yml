@@ -1,0 +1,39 @@
+name: Build Android AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build. Leave blank to use the selected branch or tag."
+        required: false
+        type: string
+      generate_signed_url:
+        description: "Generate a signed download URL artifact. The URL will not be written to the job summary."
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/_android-build.yml
+    with:
+      ref: ${{ inputs.ref }}
+      build_name: AAB
+      build_profile: production-aab
+      artifact_extension: aab
+      artifact_subdir: aab
+      generate_signed_url: ${{ inputs.generate_signed_url }}
+      gcs_bucket: ${{ vars.GCS_BUCKET }}
+      gcs_prefix: ${{ vars.GCS_PREFIX }}
+      gcs_signed_url_duration: ${{ vars.GCS_SIGNED_URL_DURATION }}
+      gcp_workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      gcp_service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+      expo_public_debug_logs: ${{ vars.EXPO_PUBLIC_DEBUG_LOGS }}
+    secrets:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      EXPO_PROJECT_ID: ${{ secrets.EXPO_PROJECT_ID }}
+      EXPO_PUBLIC_API_BASE_URL: ${{ secrets.EXPO_PUBLIC_API_BASE_URL }}
+      EXPO_PUBLIC_GOOGLE_CLIENT_ID: ${{ secrets.EXPO_PUBLIC_GOOGLE_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS: ${{ secrets.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS }}
+      EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID: ${{ secrets.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID }}
