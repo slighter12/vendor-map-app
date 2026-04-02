@@ -37,10 +37,21 @@ yarn-error.*
 gha-creds-*.json
 
 # local env files
+.env
+.env.*
 .env*.local
+!.env.example
+!.env*.example
+
+# IDE
+.idea/
+.cursor/rules/ui-ux-pro-max-skill/
 
 # typescript
 *.tsbuildinfo
+
+# test output
+coverage/
 
 app-example
 

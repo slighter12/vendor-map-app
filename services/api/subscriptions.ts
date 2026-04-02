@@ -1,4 +1,4 @@
-import { ApiSuccessResponse, request } from './util';
+import { ApiSuccessResponse, request, requestRaw } from './util';
 
 export interface DeviceInfo {
   fcm_token: string;
@@ -76,5 +76,15 @@ export const subscriptionsApi = {
       method: 'POST',
       body,
     }) as Promise<ProcessQRSubscriptionResponse>;
+  },
+  // 取得攤商自己的訂閱 QR Code（GET /api/v1/merchant/qr）
+  getMerchantQrCode: () => {
+    return requestRaw('/api/v1/merchant/qr', {
+      requireAuth: true,
+      method: 'GET',
+      headers: {
+        Accept: 'image/png',
+      },
+    });
   },
 };

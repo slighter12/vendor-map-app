@@ -4,10 +4,11 @@ import * as FileSystem from "expo-file-system";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { router } from "expo-router";
-import React, { useMemo, useRef, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Platform,
   Pressable,
   ScrollView,
@@ -16,23 +17,19 @@ import {
   View,
 } from "react-native";
 import ViewShot from "react-native-view-shot";
-import QRCode from "react-native-qrcode-svg";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/contexts/AuthContext";
-import { buildMerchantSubscribeQrData } from "@/utils/qr/subscriptionQr";
+import { subscriptionsApi } from "@/services/api/subscriptions";
 
 export default function VendorQrCodeScreen() {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
 
-  const merchantId = user?.id || "";
-  const qrValue = useMemo(() => {
-    if (!merchantId) return "";
-    return buildMerchantSubscribeQrData(merchantId);
-  }, [merchantId]);
-
   const shotRef = useRef<any>(null);
   const [busy, setBusy] = useState<"none" | "image" | "pdf" | "print">("none");
+  const [qrImageUri, setQrImageUri] = useState("");
+  const [isQrLoading, setIsQrLoading] = useState(true);
+  const [qrError, setQrError] = useState("");
 
   React.useEffect(() => {
     StatusBar.setBarStyle("light-content");
@@ -41,6 +38,41 @@ export default function VendorQrCodeScreen() {
       StatusBar.setTranslucent(true);
     }
   }, []);
+
+  const loadQrCode = useCallback(async () => {
+    try {
+      setIsQrLoading(true);
+      setQrError("");
+
+      const response = await subscriptionsApi.getMerchantQrCode();
+      const qrBlob = await response.blob();
+
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = reader.result;
+          if (typeof result === "string" && result.length > 0) {
+            resolve(result);
+            return;
+          }
+          reject(new Error("無法讀取 QR 圖片資料"));
+        };
+        reader.onerror = () => reject(new Error("QR 圖片轉換失敗"));
+        reader.readAsDataURL(qrBlob);
+      });
+
+      setQrImageUri(dataUrl);
+    } catch (error: any) {
+      setQrImageUri("");
+      setQrError(error?.message || "載入 QR Code 失敗");
+    } finally {
+      setIsQrLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadQrCode();
+  }, [loadQrCode]);
 
   const capturePng = async (): Promise<string> => {
     const uri = await shotRef.current?.capture?.({
@@ -67,7 +99,7 @@ export default function VendorQrCodeScreen() {
             .title { font-size: 20px; font-weight: 800; margin: 0 0 6px 0; }
             .sub { font-size: 12px; color: #6b7280; margin: 0 0 14px 0; }
             .qr { width: 320px; height: 320px; display: block; margin: 16px auto; }
-            .id { font-size: 12px; color: #111827; text-align: center; }
+            .hint { font-size: 12px; color: #111827; text-align: center; }
           </style>
         </head>
         <body>
@@ -75,7 +107,7 @@ export default function VendorQrCodeScreen() {
             <p class="title">訂閱 QR Code</p>
             <p class="sub">請用客戶端掃描以訂閱通知</p>
             <img class="qr" src="data:image/png;base64,${base64}" />
-            <p class="id">${title} · merchant_id: ${merchantId}</p>
+            <p class="hint">${title}</p>
           </div>
         </body>
       </html>
@@ -85,8 +117,8 @@ export default function VendorQrCodeScreen() {
   };
 
   const onShareImage = async () => {
-    if (!merchantId) {
-      Alert.alert("無法顯示", "目前未取得 merchant_id，請先登入攤商帳號");
+    if (!qrImageUri) {
+      Alert.alert("無法分享", qrError || "目前尚未載入 QR Code");
       return;
     }
     try {
@@ -105,8 +137,8 @@ export default function VendorQrCodeScreen() {
   };
 
   const onExportPdf = async () => {
-    if (!merchantId) {
-      Alert.alert("無法顯示", "目前未取得 merchant_id，請先登入攤商帳號");
+    if (!qrImageUri) {
+      Alert.alert("無法匯出", qrError || "目前尚未載入 QR Code");
       return;
     }
     try {
@@ -129,8 +161,8 @@ export default function VendorQrCodeScreen() {
   };
 
   const onPrint = async () => {
-    if (!merchantId) {
-      Alert.alert("無法顯示", "目前未取得 merchant_id，請先登入攤商帳號");
+    if (!qrImageUri) {
+      Alert.alert("無法列印", qrError || "目前尚未載入 QR Code");
       return;
     }
     try {
@@ -203,28 +235,39 @@ export default function VendorQrCodeScreen() {
               <View className="bg-white border border-gray-200 rounded-3xl p-5">
                 <View className="items-center">
                   <View className="bg-white p-3 rounded-2xl border border-gray-200">
-                    {qrValue ? (
-                      <QRCode value={qrValue} size={260} />
+                    {isQrLoading ? (
+                      <View className="w-[260px] h-[260px] items-center justify-center gap-3">
+                        <ActivityIndicator size="large" color="#6b7280" />
+                        <Text className="text-sm text-gray-600">載入 QR Code 中...</Text>
+                      </View>
+                    ) : qrImageUri ? (
+                      <Image
+                        source={{ uri: qrImageUri }}
+                        style={{ width: 260, height: 260 }}
+                        resizeMode="contain"
+                      />
+                    ) : qrError ? (
+                      <View className="w-[260px] h-[260px] items-center justify-center px-4">
+                        <Ionicons name="alert-circle-outline" size={28} color="#DC2626" />
+                        <Text className="mt-3 text-center text-sm text-gray-700">
+                          {qrError}
+                        </Text>
+                        <Pressable
+                          onPress={() => void loadQrCode()}
+                          className="mt-4 rounded-xl bg-gray-900 px-4 py-2"
+                        >
+                          <Text className="font-semibold text-white">重新載入</Text>
+                        </Pressable>
+                      </View>
                     ) : (
                       <View className="w-[260px] h-[260px] items-center justify-center">
-                        <Text className="text-sm text-gray-600">
-                          尚未取得 merchant_id
-                        </Text>
+                        <Text className="text-sm text-gray-600">尚未取得 QR Code</Text>
                       </View>
                     )}
                   </View>
 
-                  <Text className="text-xs text-gray-500 mt-4">
-                    merchant_id
-                  </Text>
-                  <Text
-                    selectable
-                    className="text-xs text-gray-800 mt-1"
-                    style={{
-                      fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
-                    }}
-                  >
-                    {merchantId || "(空)"}
+                  <Text className="mt-4 text-xs text-gray-500">
+                    此 QR Code 由系統依目前登入的攤商帳號產生
                   </Text>
                 </View>
               </View>
@@ -288,4 +331,3 @@ export default function VendorQrCodeScreen() {
     </SafeAreaView>
   );
 }
-

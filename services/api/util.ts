@@ -196,11 +196,10 @@ const refreshAuthToken = async (): Promise<string | null> => {
   }
 };
 
-// 簡潔的請求函數
-export const request = async <T>(
+export const requestRaw = async (
   endpoint: string,
   config: RequestConfig
-): Promise<ApiSuccessResponse<T>> => {
+): Promise<Response> => {
   const { method = 'POST', headers, body, requireAuth = false } = config;
   const baseUrl = getApiBaseUrl();
 
@@ -270,10 +269,9 @@ export const request = async <T>(
         console.error(`❌ 重試請求後仍失敗: ${retryResponse.status}`, raw);
         throw extractError(retryResponse.status, raw);
       }
-      
-      const result = await parseBody(retryResponse);
-      debugLog(`✅ API 響應成功 (使用新token):`, result);
-      return normalizeSuccess<T>(result);
+
+      debugLog(`✅ API 響應成功 (使用新token): ${method} ${endpoint}`);
+      return retryResponse;
     } else {
       console.error('❌ 無法刷新token，需要重新登入');
       throw new ApiError('登入已過期，請重新登入', {
@@ -289,6 +287,16 @@ export const request = async <T>(
     throw extractError(response.status, raw);
   }
 
+  debugLog(`✅ API 響應成功: ${method} ${endpoint}`);
+  return response;
+};
+
+// 簡潔的請求函數
+export const request = async <T>(
+  endpoint: string,
+  config: RequestConfig
+): Promise<ApiSuccessResponse<T>> => {
+  const response = await requestRaw(endpoint, config);
   const result = await parseBody(response);
   debugLog(`✅ API 響應成功:`, result);
   return normalizeSuccess<T>(result);
